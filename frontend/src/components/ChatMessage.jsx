@@ -1,8 +1,7 @@
 import React, { useState } from "react";
-import { Check, Copy, User, Sigma as SigmaIcon } from "lucide-react";
+import { Check, Copy, User, Sigma as SigmaIcon, RotateCcw } from "lucide-react";
+import { renderMarkdownBlock } from "../utils/markdown.jsx";
 
-// Very small formatter: turns ```code``` fenced blocks into <pre><code>,
-// and leaves the rest as plain text with line breaks preserved.
 function parseContent(text) {
   const parts = text.split(/```(\w*)\n?/g);
   const blocks = [];
@@ -45,7 +44,7 @@ function CodeBlock({ value, lang }) {
   );
 }
 
-export default function ChatMessage({ role, content, timestamp }) {
+export default function ChatMessage({ role, content, timestamp, isLastAssistant, onRegenerate, isStreaming }) {
   const isUser = role === "user";
   const blocks = parseContent(content);
   const time = timestamp
@@ -64,13 +63,19 @@ export default function ChatMessage({ role, content, timestamp }) {
             b.type === "code" ? (
               <CodeBlock key={i} value={b.value} lang={b.lang} />
             ) : (
-              <p key={i} style={{ whiteSpace: "pre-wrap", margin: "0 0 8px" }}>
-                {b.value}
-              </p>
+              <div key={i}>{renderMarkdownBlock(b.value, `blk-${i}`)}</div>
             )
           )}
         </div>
-        {time && <span className="message-time">{time}</span>}
+        <div className="bubble-meta">
+          {time && <span className="message-time">{time}</span>}
+          {!isUser && isLastAssistant && !isStreaming && content && (
+            <button className="regenerate-btn" onClick={onRegenerate} title="Regenerate response">
+              <RotateCcw size={12} />
+              <span>Regenerate</span>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

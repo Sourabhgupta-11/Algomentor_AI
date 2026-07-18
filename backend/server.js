@@ -1,3 +1,16 @@
+/**
+ * AlgoMentor AI - Backend Server
+ * ---------------------------------
+ * Express server that:
+ *  - Serves a JSON REST endpoint for chat
+ *  - Streams responses from the Google Gemini API to the client via
+ *    Server-Sent Events (SSE) so the UI can render text progressively.
+ *  - Serves a non-streaming JSON endpoint for generating structured
+ *    practice problems (used by the Practice page).
+ *  - Keeps the GEMINI_API_KEY strictly on the server side (never sent
+ *    to the frontend or committed to version control).
+ */
+
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -11,7 +24,7 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 
 if (!GEMINI_API_KEY) {
   console.warn(
-    "[WARN] GEMINI_API_KEY is not set. Requests to /api/chat will fail until it is configured in the environment (.env file or AWS environment variables)."
+    "[WARN] GEMINI_API_KEY is not set. Requests to /api/chat and /api/problems/generate will fail until it is configured in the environment (.env file or your cloud service's environment variables)."
   );
 }
 
@@ -27,7 +40,15 @@ const chatLimiter = rateLimit({
   message: { error: "Too many requests. Please wait a moment and try again." },
 });
 
-// ---- Persona / system prompt -------------------------------------------
+const problemLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please wait a moment and try again." },
+});
+
+// ---- Persona / system prompt (chat) --------------------------------------
 const MODE_INSTRUCTIONS = {
   hint: "The student wants a HINT only. Do NOT give the full solution or working code. Nudge them toward the right idea, algorithm family, or observation. Ask a guiding question if useful.",
   explain: "The student wants a CONCEPT EXPLAINED. Explain the underlying algorithm/data structure clearly with a small illustrative example. You may include short pseudocode, but keep it educational rather than a copy-paste solution.",
@@ -57,9 +78,34 @@ function toGeminiContents(messages) {
   }));
 }
 
+// ---- Static topic list (used by the Practice page) -----------------------
+const TOPICS = [
+  { id: "arrays", label: "Arrays & Strings" },
+  { id: "two-pointers", label: "Two Pointers / Sliding Window" },
+  { id: "greedy", label: "Greedy" },
+  { id: "dp", label: "Dynamic Programming" },
+  { id: "graphs", label: "Graphs (BFS/DFS)" },
+  { id: "shortest-path", label: "Shortest Paths (Dijkstra/Bellman-Ford)" },
+  { id: "trees", label: "Trees" },
+  { id: "segment-tree", label: "Segment Trees / Fenwick Trees" },
+  { id: "binary-search", label: "Binary Search" },
+  { id: "number-theory", label: "Number Theory" },
+  { id: "combinatorics", label: "Combinatorics & Probability" },
+  { id: "string-algos", label: "String Algorithms (KMP, Z-function)" },
+  { id: "data-structures", label: "Data Structures (Stacks/Queues/Heaps)" },
+  { id: "bitmasking", label: "Bitmasking" },
+];
+
+const DIFFICULTIES = ["Div. 2 A", "Div. 2 B", "Div. 2 C", "Div. 2 D", "Div. 1 A/B"];
+
 // ---- Health check --------------------------------------------------------
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", model: MODEL, keyConfigured: Boolean(GEMINI_API_KEY) });
+});
+
+// ---- Topics list (static metadata for the Practice page) -----------------
+app.get("/api/topics", (req, res) => {
+  res.json({ topics: TOPICS, difficulties: DIFFICULTIES });
 });
 
 // ---- Streaming chat endpoint ---------------------------------------------
@@ -74,7 +120,6 @@ app.post("/api/chat", chatLimiter, async (req, res) => {
       return res.status(500).json({ error: "Server is missing GEMINI_API_KEY. Add it to backend/.env and restart the server." });
     }
 
-    // Set up SSE headers
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -145,6 +190,7 @@ app.post("/api/chat", chatLimiter, async (req, res) => {
             res.write(`event: done\ndata: {}\n\n`);
           }
         } catch {
+          // ignore malformed SSE line
         }
       }
     }
@@ -156,7 +202,88 @@ app.post("/api/chat", chatLimiter, async (req, res) => {
       res.write(`event: error\ndata: ${JSON.stringify({ error: `Internal server error: ${err.message}` })}\n\n`);
       res.end();
     } catch {
+      // response may already be closed
     }
+  }
+});
+
+// ---- Practice problem generator (non-streaming, structured JSON) --------
+app.post("/api/problems/generate", problemLimiter, async (req, res) => {
+  try {
+    const { topic = "arrays", difficulty = "Div. 2 B", language = "C++" } = req.body;
+
+    if (!GEMINI_API_KEY) {
+      return res.status(500).json({ error: "Server is missing GEMINI_API_KEY. Add it to backend/.env and restart the server." });
+    }
+
+    const prompt = `Generate ONE original competitive programming practice problem.
+
+Topic focus: ${topic}
+Target difficulty: ${difficulty} (Codeforces-style)
+Solution language for the hint: ${language}
+
+Respond with ONLY a raw JSON object (no markdown fences, no commentary) matching exactly this shape:
+{
+  "title": "string",
+  "difficulty": "string",
+  "tags": ["string", "string"],
+  "statement": "string (the full problem statement, 2-4 paragraphs)",
+  "constraints": "string (bullet-style constraints as plain text with newlines)",
+  "sampleInput": "string",
+  "sampleOutput": "string",
+  "hint": "string (one short hint, no full solution or code)"
+}`;
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+    let geminiResponse;
+    try {
+      geminiResponse = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            maxOutputTokens: 1200,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+    } catch (networkErr) {
+      return res.status(502).json({ error: `Network error reaching Gemini API: ${networkErr.message}` });
+    }
+
+    if (!geminiResponse.ok) {
+      let errDetail = "";
+      try {
+        const errJson = await geminiResponse.json();
+        errDetail = errJson?.error?.message || JSON.stringify(errJson);
+      } catch {
+        errDetail = await geminiResponse.text().catch(() => "Unknown upstream error");
+      }
+      console.error(`[Gemini API error] status=${geminiResponse.status} detail=${errDetail}`);
+      return res.status(502).json({ error: `Gemini API returned ${geminiResponse.status}: ${errDetail}` });
+    }
+
+    const data = await geminiResponse.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!rawText) {
+      return res.status(502).json({ error: "The AI returned an empty response. Try again." });
+    }
+
+    let problem;
+    try {
+      problem = JSON.parse(rawText);
+    } catch {
+      console.error("[Problem generator] Failed to parse JSON:", rawText);
+      return res.status(502).json({ error: "The AI returned malformed data. Try again." });
+    }
+
+    res.json({ problem });
+  } catch (err) {
+    console.error("Problem generation error:", err);
+    res.status(500).json({ error: `Internal server error: ${err.message}` });
   }
 });
 

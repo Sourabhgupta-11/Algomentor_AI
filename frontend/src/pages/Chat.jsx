@@ -1,33 +1,31 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Send, Menu, X, AlertTriangle } from "lucide-react";
-import Sidebar from "../components/Sidebar.jsx";
+import { Send, Menu, X, AlertTriangle, Square } from "lucide-react";
+import ConversationRail from "../components/ConversationRail.jsx";
+import SettingsPanel from "../components/SettingsPanel.jsx";
 import ChatMessage from "../components/ChatMessage.jsx";
+import { useChatHistory } from "../context/ChatHistoryContext.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
-const WELCOME = {
-  role: "assistant",
-  content:
-    "Hey! I'm AlgoMentor. Paste a Codeforces problem, ask about an algorithm, or tell me a topic and I'll generate a fresh practice problem. Pick a mode on the left to control how much I reveal.",
-  timestamp: Date.now(),
-};
-
 export default function Chat() {
-  const [messages, setMessages] = useState([WELCOME]);
+  const { activeConversation, updateConversation, clearConversation } = useChatHistory();
   const [input, setInput] = useState("");
-  const [mode, setMode] = useState("hint");
-  const [language, setLanguage] = useState("C++");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const scrollRef = useRef(null);
   const textareaRef = useRef(null);
+  const abortRef = useRef(null);
+
+  const messages = activeConversation?.messages || [];
+  const mode = activeConversation?.mode || "hint";
+  const language = activeConversation?.language || "C++";
+  const convId = activeConversation?.id;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  // Auto-resize the composer textarea as the user types.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -35,39 +33,41 @@ export default function Chat() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
-  const handleClear = () => {
-    setMessages([WELCOME]);
-    setError(null);
-    textareaRef.current?.focus();
-  };
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [convId]);
+
+  const setMode = (m) => updateConversation(convId, { mode: m });
+  const setLanguage = (l) => updateConversation(convId, { language: l });
 
   const handleExample = (text) => {
     setInput(text);
     textareaRef.current?.focus();
   };
 
-  const sendMessage = async () => {
-    const trimmed = input.trim();
-    if (!trimmed || isStreaming) return;
+  const stopStreaming = () => {
+    abortRef.current?.abort();
+    setIsStreaming(false);
+  };
 
-    const userMsg = { role: "user", content: trimmed, timestamp: Date.now() };
-    const nextMessages = [...messages, userMsg];
-    setMessages([...nextMessages, { role: "assistant", content: "", timestamp: Date.now() }]);
-    setInput("");
+  const runStream = async (historyForRequest) => {
     setIsStreaming(true);
     setError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const response = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: nextMessages
-            .filter((m) => m !== WELCOME)
-            .map((m) => ({ role: m.role, content: m.content })),
+          messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
           mode,
           language,
         }),
+        signal: controller.signal,
       });
 
       if (!response.ok || !response.body) {
@@ -111,14 +111,14 @@ export default function Chat() {
 
           if (eventType === "token" && data.text) {
             assistantText += data.text;
-            setMessages((prev) => {
-              const updated = [...prev];
+            updateConversation(convId, (c) => {
+              const updated = [...c.messages];
               updated[updated.length - 1] = {
                 role: "assistant",
                 content: assistantText,
                 timestamp: updated[updated.length - 1].timestamp,
               };
-              return updated;
+              return { messages: updated };
             });
           } else if (eventType === "error") {
             streamErrored = true;
@@ -131,19 +131,41 @@ export default function Chat() {
         throw new Error("The AI returned an empty response. Try again, or check the backend logs.");
       }
     } catch (err) {
+      if (err.name === "AbortError") {
+        return;
+      }
       console.error(err);
       setError(err.message || "Something went wrong talking to the AI. Check the backend logs for details.");
-      setMessages((prev) => {
-        const updated = [...prev];
+      updateConversation(convId, (c) => {
+        const updated = [...c.messages];
         if (updated[updated.length - 1]?.role === "assistant" && updated[updated.length - 1]?.content === "") {
           updated.pop();
         }
-        return updated;
+        return { messages: updated };
       });
     } finally {
       setIsStreaming(false);
       textareaRef.current?.focus();
     }
+  };
+
+  const sendMessage = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || isStreaming || !convId) return;
+
+    const userMsg = { role: "user", content: trimmed, timestamp: Date.now() };
+    const nextMessages = [...messages, userMsg, { role: "assistant", content: "", timestamp: Date.now() }];
+    updateConversation(convId, { messages: nextMessages });
+    setInput("");
+
+    await runStream([...messages, userMsg]);
+  };
+
+  const handleRegenerate = async () => {
+    if (isStreaming || messages.length < 2) return;
+    const withoutLast = messages.slice(0, -1);
+    updateConversation(convId, { messages: [...withoutLast, { role: "assistant", content: "", timestamp: Date.now() }] });
+    await runStream(withoutLast);
   };
 
   const handleKeyDown = (e) => {
@@ -153,8 +175,7 @@ export default function Chat() {
     }
   };
 
-  const isLastAssistantEmpty =
-    isStreaming &&
+  const lastMsgIsEmptyAssistant =
     messages.length > 0 &&
     messages[messages.length - 1].role === "assistant" &&
     messages[messages.length - 1].content === "";
@@ -163,40 +184,41 @@ export default function Chat() {
     <div className="chat-shell">
       <button
         className="mobile-menu-btn"
-        aria-label={sidebarOpen ? "Close settings menu" : "Open settings menu"}
+        aria-label={sidebarOpen ? "Close conversation history" : "Open conversation history"}
         aria-expanded={sidebarOpen}
         onClick={() => setSidebarOpen((o) => !o)}
       >
         {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
       </button>
 
-      <Sidebar
-        mode={mode}
-        setMode={setMode}
-        language={language}
-        setLanguage={setLanguage}
-        onClear={handleClear}
-        onExample={handleExample}
-        isOpen={sidebarOpen}
-        onCloseMobile={() => setSidebarOpen(false)}
-      />
+      <ConversationRail isOpen={sidebarOpen} onCloseMobile={() => setSidebarOpen(false)} />
 
       {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} aria-hidden="true" />}
 
       <main className="chat-panel">
         <header className="chat-header">
-          <h2>Chat</h2>
-          <span className="chat-header-sub">
-            <span className={`mode-pill mode-pill-${mode}`}>{mode}</span>
-            <span className="chat-header-lang">{language}</span>
-          </span>
+          <h2 className="chat-header-title">{activeConversation?.title || "Chat"}</h2>
+          <div className="chat-header-controls">
+            <SettingsPanel mode={mode} setMode={setMode} language={language} setLanguage={setLanguage} onExample={handleExample} />
+            <button className="clear-icon-btn" onClick={() => clearConversation(convId)} title="Clear this conversation">
+              Clear
+            </button>
+          </div>
         </header>
 
         <div className="chat-scroll" ref={scrollRef} role="log" aria-live="polite" aria-label="Conversation">
           {messages.map((m, i) => (
-            <ChatMessage key={i} role={m.role} content={m.content} timestamp={m.timestamp} />
+            <ChatMessage
+              key={i}
+              role={m.role}
+              content={m.content}
+              timestamp={m.timestamp}
+              isLastAssistant={i === messages.length - 1 && m.role === "assistant"}
+              isStreaming={isStreaming}
+              onRegenerate={handleRegenerate}
+            />
           ))}
-          {isLastAssistantEmpty && (
+          {isStreaming && lastMsgIsEmptyAssistant && (
             <div className="message-row assistant" aria-label="AlgoMentor is typing">
               <div className="avatar" aria-hidden="true">Σ</div>
               <div className="bubble typing-bubble">
@@ -229,18 +251,20 @@ export default function Chat() {
             rows={1}
             aria-label="Type your message"
           />
-          <button
-            className="send-btn"
-            onClick={sendMessage}
-            disabled={isStreaming || !input.trim()}
-            aria-label={isStreaming ? "Waiting for response" : "Send message"}
-          >
-            {isStreaming ? (
-              <span className="send-spinner" aria-hidden="true" />
-            ) : (
+          {isStreaming ? (
+            <button className="send-btn stop-btn" onClick={stopStreaming} aria-label="Stop generating">
+              <Square size={14} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              className="send-btn"
+              onClick={sendMessage}
+              disabled={!input.trim()}
+              aria-label="Send message"
+            >
               <Send size={16} />
-            )}
-          </button>
+            </button>
+          )}
         </div>
       </main>
     </div>

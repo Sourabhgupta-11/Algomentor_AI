@@ -31,6 +31,7 @@ const FEATURES = [
     icon: Dice5,
     title: "Practice Generator",
     desc: "Fresh Codeforces-style problems on any topic, on demand.",
+    link: "/practice",
   },
 ];
 
@@ -81,18 +82,28 @@ export default function Landing() {
         </div>
       </section>
 
-      <section className="features">
+<section className="features">
         <h2 className="section-title">Four ways to get unstuck</h2>
         <div className="feature-grid">
-          {FEATURES.map((f) => (
-            <div className="feature-card" key={f.title}>
-              <div className="feature-icon">
-                <f.icon size={20} />
+          {FEATURES.map((f) =>
+            f.link ? (
+              <Link to={f.link} className="feature-card feature-card-link" key={f.title}>
+                <div className="feature-icon">
+                  <f.icon size={20} />
+                </div>
+                <h3>{f.title}</h3>
+                <p>{f.desc}</p>
+              </Link>
+            ) : (
+              <div className="feature-card" key={f.title}>
+                <div className="feature-icon">
+                  <f.icon size={20} />
+                </div>
+                <h3>{f.title}</h3>
+                <p>{f.desc}</p>
               </div>
-              <h3>{f.title}</h3>
-              <p>{f.desc}</p>
-            </div>
-          ))}
+            )
+          )}
         </div>
       </section>
 

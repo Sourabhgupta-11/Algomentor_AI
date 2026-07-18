@@ -1,12 +1,13 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Sigma, Sun, Moon, MessageSquareCode } from "lucide-react";
+import { Sigma, Sun, Moon, MessageSquareCode, Dice5 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext.jsx";
 
 export default function Navbar() {
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const isChat = location.pathname.startsWith("/chat");
+  const isPractice = location.pathname.startsWith("/practice");
 
   return (
     <nav className="navbar">
@@ -18,12 +19,14 @@ export default function Navbar() {
       </Link>
 
       <div className="navbar-actions">
-        {!isChat && (
-          <Link to="/chat" className="navbar-cta">
-            <MessageSquareCode size={16} />
-            <span>Open Chat</span>
-          </Link>
-        )}
+        <Link to="/practice" className={`navbar-link ${isPractice ? "navbar-link-active" : ""}`}>
+          <Dice5 size={15} />
+          <span>Practice</span>
+        </Link>
+        <Link to="/chat" className={`navbar-link ${isChat ? "navbar-link-active" : ""}`}>
+          <MessageSquareCode size={15} />
+          <span>Chat</span>
+        </Link>
         <button
           className="theme-toggle"
           onClick={toggleTheme}
